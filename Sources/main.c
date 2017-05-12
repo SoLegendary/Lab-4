@@ -55,11 +55,15 @@
 #define CMD_PROGBYTE  0x07
 #define CMD_READBYTE  0x08
 #define CMD_SETTIME   0x0C
+#define CMD_MODE      0x0A
+#define CMD_ACCEL     0x10
 
 // Global volatile variables
 
 volatile uint16union_t *towerNumber = NULL; // Currently set tower number and mode
 volatile uint16union_t *towerMode   = NULL;
+
+
 
 // Function Initializations
 
@@ -165,13 +169,10 @@ bool HandleTowerModePacket(void)
   if (Packet_Parameter1 == 0x02) // If the packet is in SET mode, set the tower mode by storing it in flash before returning the packet
   {
     bool success = Flash_Write16((uint16_t*)towerMode, Packet_Parameter23);
-
     return Packet_Put(CMD_TOWERMODE, 0x01, towerMode->s.Lo, towerMode->s.Hi) && success;
   }
   else if (Packet_Parameter1 == 0x01) // If the packet is in GET mode, just return the current tower mode
-  {
     return Packet_Put(CMD_TOWERMODE, 0x01, towerMode->s.Lo, towerMode->s.Hi);
-  }
 
   // If the packet is not in either SET or GET mode, return false
   return false;
@@ -247,6 +248,45 @@ bool HandleSetTimePacket(void)
 }
 
 
+
+/*!
+ * @brief Handles a Protocol - Mode packet as per the Tower Serial Communication Protocol document
+ * - either getting or setting the mode of operation for the accelerometer module (polling vs interrupts)
+ *
+ * Parameter1 = 1 for GET, 2 for SET
+ * Parameter2 = 0 for asynchronous (polling)
+ *              1 for synchronous (interrupts)
+ * Parameter3 = 0
+ *
+ * @return bool - TRUE if the packet was handled successfully, FALSE if parameters out of range.
+ */
+bool HandleModePacket(void)
+{
+  static bool synchronousMode = true; // variable to track current I2C mode (synchronous by default)
+	
+  if (Packet_Parameter1 == 0x02) // If the packet is for SET change the mode using Accel_SetMode()
+  {
+    switch (Packet_Parameter2)
+	{
+	  case 0:
+	    PIT_Enable(false);
+	    return Accel_SetMode(ACCEL_POLL);
+      case 1:
+	    PIT_Enable(true);
+	    return Accel_SetMode(ACCEL_INT);
+      default:
+	    return false;
+	}
+  }
+  
+  else if (Packet_Parameter1 == 0x01) // If the packet is for GET, just return the current mode
+    return (Packet_Put(CMD_MODE, 1, synchronousMode, 0));
+
+  // If the packet is not in either SET or GET mode, return false
+  return false;
+}
+
+
   
 /*!
  * @brief Handles the packet by first checking to see what type of packet it is and processing it
@@ -286,6 +326,9 @@ void HandlePacket(void)
     case CMD_SETTIME:
       success = HandleSetTimePacket();
       break;
+	case CMD_MODE:
+	  success = HandleModePacket();
+	  break;
     default:
       success = false;
       break;
@@ -311,44 +354,61 @@ void HandlePacket(void)
 }
   
   
+  
+/*************************************/
+/** CALLBACK FUNCTIONS FOR ALL ISRs **/
+/*************************************/
 
-/*!
- * @brief User callback function for use as a PIT_Init parameter
- * Every 500ms PIT_ISR is triggered and toggles Green LED
+/*! @brief User callback function for use as a PIT_Init parameter
+ *  Every period set by PIT_Set, PIT_ISR is triggered and calls this function
  */
 void PITCallback(void* arg)
 {
   LEDs_Toggle(LED_GREEN);
 }
   
-  
-  
-/*!
- * @brief User callback function for use as an RTC_Init parameter
- * Every 1s the RTC interrupt occurs to send back clock time to the PC and toggles Yellow LED
+/*! @brief User callback function for use as an RTC_Init parameter
+ *  Every second the RTC interrupt occurs to send back clock time to the PC and toggles Yellow LED
  */
 void RTCCallback(void* arg)
 {
   // Get and send time back to PC, just as in HandleSetTimePacket
-
   uint8_t seconds, minutes, hours;
   RTC_Get(&seconds, &minutes, &hours);
 
-  Packet_Put(CMD_SETTIME, seconds, minutes, hours);
-
   LEDs_Toggle(LED_YELLOW);
+  Packet_Put(CMD_SETTIME, seconds, minutes, hours);
 }
 
-
-
-/*!
- * @brief User callback function for use as an FTM_Set parameter
- * After a 1s delay set by Packet.c receiving a valid packet and turning on Blue LED, this turns it off
+/*! @brief User callback function for use as an FTM_Set parameter
+ *  After a 1s delay set by Packet.c receiving a valid packet and turning on Blue LED, this turns it off
  */
 void FTM0Callback(void* arg)
 {
   LEDs_Off(LED_BLUE);
 }
+
+/*! @brief User callback function for the accelerometer data reading
+ *  After data is ready to be read, call Accel_ReadXYZ and save its data and send it back to the PC
+ */
+void AccelCallback(void* arg)
+{
+  TAccelData accelData; // union to save data from the accelerometer readings
+  
+  Accel_ReadXYZ(accelData->Bytes);
+  Packet_Put(CMD_ACCEL, accelData.bytes[0], accelData.bytes[1], accelData.bytes[2]);
+}
+ 
+/*! @brief User callback function for the I2C data complete
+ *  After data read from AccelCallback, I2C_ISR is triggered to toggle the green LED 
+ */
+void I2CCallback(void* arg)
+{
+  LEDs_Toggle(LED_GREEN);
+}
+
+
+
 
 
 
@@ -358,15 +418,24 @@ int main(void)
 {
   /* Write your local variable definition here */
 
-  const uint32_t BAUDRATE = 115200;
+  const uint32_t BAUDRATE      = 115200;
+  const uint32_t ACCELBAUDRATE = 100000;
 
-  TFTMChannel FTM0Channel0;        // Struct to set up channel 0 in the FTM module
+  TFTMChannel FTM0Channel0; // Struct to set up channel 0 in the FTM module
   FTM0Channel0.channelNb           = 0;
   FTM0Channel0.timerFunction       = TIMER_FUNCTION_OUTPUT_COMPARE;
   FTM0Channel0.ioType.outputAction = TIMER_OUTPUT_LOW;
   FTM0Channel0.userFunction        = FTM0Callback;
   FTM0Channel0.userArguments       = NULL;
-
+  
+  TAccelSetup accelSetup; // Struct to set up the accelerometer via I2C0
+  accelSetup.moduleClk                     = 50000000;
+  accelSetup.dataReadyCallbackFunction     = AccelCallback;
+  accelSetup.dataReadyCallbackArguments    = NULL;
+  accelSetup.readCompleteCallbackFunction  = I2CCallback;
+  accelSetup.readCompleteCallbackArguments = NULL;
+  
+  
 
   /*** Processor Expert internal initialization. DON'T REMOVE THIS CODE!!! ***/
   PE_low_level_init();
@@ -383,9 +452,11 @@ int main(void)
       FTM_Init() &&
       FTM_Set(&FTM0Channel0) &&
       PIT_Init(CPU_BUS_CLK_HZ, PITCallback, NULL) && 
-      RTC_Init(RTCCallback, NULL))
+      RTC_Init(RTCCallback, NULL) &&
+	  Accel_Init(accelSetup))
   {
-    PIT_Set(500000000, true);
+	// Sets PIT to frequency of 1.56Hz
+    PIT_Set(641025641, true);
     PIT_Enable(true);
     LEDs_On(LED_ORANGE);
     HandleStartupPacket();

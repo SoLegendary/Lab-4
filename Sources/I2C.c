@@ -14,6 +14,23 @@
 **  @{
 */
 
+/*
+
+Asynchronous 'polling' mode has a 1Hz frequency - this can be done using the PIT to just
+poll for new data in the accel.c registers and only return it on that poll if new data is out
+
+Synchronous 'interrupt' mode has a 1.56Hz frequency but doesn't care about whether or not data is new
+How can an interrupt mode be periodic without just using the PIT?
+
+FROM HINTS:
+the accelerometer takes samples periodically and asserts 
+an interrupt to the microcontroller when data is ready. 
+
+MAYBE the frequency refers to the rate at which data samples are taken for median filtering?
+
+
+*/
+
 #include "types.h"
 #include "I2C.h"
 
@@ -89,13 +106,6 @@ static uint16_t SCLDivider(uint8_t icr)
   }
 }
 
-typedef struct
-{
-  uint8_t primarySlaveAddress;
-  uint32_t baudRate;
-  void (*readCompleteCallbackFunction)(void*);  /*!< The user's read complete callback function. */
-  void* readCompleteCallbackArguments;          /*!< The user's read complete callback function arguments. */
-} TI2CModule;
 
 uint8_t primarySlaveAddress = 0; // use this private global to keep track of slave address instead of 
 
@@ -156,7 +166,13 @@ bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
   I2C0_F |= I2C_F_MULT(multSave);
   I2C0_F |= I2C_F_ICR(icrSave);
   
-  // NVIC inits
+  // Setting up NVIC for I2C0 see K70 manual pg 97
+  // Vector=40, IRQ=24
+  // NVIC non-IPR=0 IPR=6
+  // Clear any pending interrupts on I2C0
+  NVICICPR0 = (1 << 24); // 24mod32 = 24
+  // Enable interrupts from the I2C0
+  NVICISER0 = (1 << 24);
   
 }
 
@@ -244,7 +260,6 @@ void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8
  *  @note Assumes the I2C module has been initialized.
  *
  *  Interrupt flag is IICIF which only sets if a transfer is COMPLETE
- *  Callback saves the data and calls Packet_Put to send the data back to the PC
  */
 void __attribute__ ((interrupt)) I2C_ISR(void)
 {

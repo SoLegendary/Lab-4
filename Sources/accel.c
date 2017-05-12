@@ -219,11 +219,19 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
   if(!I2C_Init(aI2CModule, moduleClk))
     return false;
   
+  // Possibly use I2C_Write() here to write any initialising registers on the accelerometer 
+  
   // Saving callback function pointers and arguments
   dataReadyCallbackFunction  = accelSetup->dataReadyCallbackFunction;
   dataReadyCallbackArguments = accelSetup->dataReadyCallbackArguments;
   
-  // NVIC inits
+  // Setting up NVIC for PORTB see K70 manual pg 97
+  // Vector=104, IRQ=88
+  // NVIC non-IPR=2 IPR=22
+  // Clear any pending interrupts on PORTB
+  NVICICPR2 = (1 << 24); // 88mod32 = 24
+  // Enable interrupts from PORTB
+  NVICISER2 = (1 << 24);
   
   return true;
 }
@@ -271,7 +279,7 @@ void Accel_SetMode(const TAccelMode mode)
  */
 void __attribute__ ((interrupt)) AccelDataReady_ISR(void)
 {
-  
+  // SRC_DRDY flag is the data ready interrupt flag
 }
 
 
