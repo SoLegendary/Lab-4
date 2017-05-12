@@ -205,6 +205,9 @@ bool interruptMode = false; // private global to track whether we are in polling
  */
 bool Accel_Init(const TAccelSetup* const accelSetup)
 {
+  // Accelerometer is connected to PORTB pin 4 (see tower schematics)
+  SIM_SCGC5 |= SIM_SCGC5_PORTB_MASK;
+	
   // Initialising I2C which controls the accelerometer
   // Using a TI2CModule struct defined in I2C.h
   TI2CModule aI2CModule;
@@ -216,11 +219,8 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
   if(!I2C_Init(aI2CModule, moduleClk))
     return false;
   
-  // Accelerometer is connected to PORTB pin 4 (see tower schematics)
-  SIM_SCGC5 |= SIM_SCGC5_PORTB_MASK;
-  
   // Saving callback function pointers and arguments
-  dataReadyCallbackFunction = accelSetup->dataReadyCallbackFunction;
+  dataReadyCallbackFunction  = accelSetup->dataReadyCallbackFunction;
   dataReadyCallbackArguments = accelSetup->dataReadyCallbackArguments;
   
   // NVIC inits

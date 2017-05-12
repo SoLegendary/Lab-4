@@ -19,7 +19,7 @@
 
 // Private global variables for user callback function and its arguments
 void (*I2CCallback)(void*) = 0;
-void *I2CCallbackArg = 0;
+void *I2CCallbackArg       = 0;
 
 typedef struct
 {
@@ -31,7 +31,7 @@ typedef struct
 
 
 // private function to return the SCL divider value that matches the current ICR value
-static uint16_t SCL_Divider(uint8_t icr)
+static uint16_t SCLDivider(uint8_t icr)
 {
   // icr determines SCL divider (see K70 manual pg. 1885)
   switch (icr)
@@ -89,7 +89,13 @@ static uint16_t SCL_Divider(uint8_t icr)
   }
 }
 
-
+typedef struct
+{
+  uint8_t primarySlaveAddress;
+  uint32_t baudRate;
+  void (*readCompleteCallbackFunction)(void*);  /*!< The user's read complete callback function. */
+  void* readCompleteCallbackArguments;          /*!< The user's read complete callback function arguments. */
+} TI2CModule;
 
 uint8_t primarySlaveAddress = 0; // use this private global to keep track of slave address instead of 
 
@@ -101,7 +107,58 @@ uint8_t primarySlaveAddress = 0; // use this private global to keep track of sla
  *  @return BOOL - TRUE if the I2C module was successfully initialized.
  */
 bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
-
+{
+  // System clock gate enable
+  SIM_SCGC4 |= SIM_SCGC4_IIC0_MASK;
+	
+  // I2C enable and interrupt enable
+  I2C0_C1 |= I2C_C1_IICEN_MASK;
+  I2C0_C1 |= I2C_C1_IICIE_MASK;
+	
+  // Saving primary slave address and callback function + arguments into private global variables
+  primarySlaveAddress = aI2CModule->primarySlaveAddress;
+  I2CCallback         = aI2CModule->readCompleteCallbackFunction;
+  I2CCallbackArg      = aI2CModule->readCompleteCallbackArguments;
+	
+  uint8_t multSave; // saves the best value for the mult register
+  uint8_t icrSave; // saves the best value for the icr register
+  uint32_t baudRateError; // baud rate error for current combination of mult and icr in the loop
+  uint32_t baudRateErrorMin = aI2CModule->baudRate; // current lowest value for baud rate error range
+  
+  for (uint8_t multReg = 0; multReg < 3; multReg++)
+  {
+	switch (multReg) // mult is used in the formula for baud rate, 
+	{                // whereas multReg is the value to be written into the MULT register
+	  case 0:
+	    mult = 1;
+		break;
+	  case 1:
+	    mult = 2;
+		break;
+	  case 2:
+	    mult = 4;
+		break;
+	}
+	
+	for (uint8_t icr = 10; icr <= 0x3F; icr++)
+	{
+	  baudRateError = aI2CModule->baudRate - (moduleClk/(mult*SCLDivider(icr)));
+	
+	  if (baudRateError < baudRateErrorMin)
+	  {
+		baudRateErrorMin = baudRateError;
+		multSave = multReg;
+		icrSave = icr;
+	  }
+	}
+  }
+  // Write in register values for the most accurate baud rate
+  I2C0_F |= I2C_F_MULT(multSave);
+  I2C0_F |= I2C_F_ICR(icrSave);
+  
+  // NVIC inits
+  
+}
 
 
 /*! @brief Selects the current slave device
