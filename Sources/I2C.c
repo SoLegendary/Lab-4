@@ -16,18 +16,8 @@
 
 /*
 
-Asynchronous 'polling' mode has a 1Hz frequency - this can be done using the PIT to just
-poll for new data in the accel.c registers and only return it on that poll if new data is out
-
-Synchronous 'interrupt' mode has a 1.56Hz frequency but doesn't care about whether or not data is new
-How can an interrupt mode be periodic without just using the PIT?
-
-FROM HINTS:
-the accelerometer takes samples periodically and asserts 
-an interrupt to the microcontroller when data is ready. 
-
-MAYBE the frequency refers to the rate at which data samples are taken for median filtering?
-
+Frequency specified in the lab notes refers to the SAMPLE RATE of the accelerometer (ie. how often it creates new data)
+NOT the frequency of any interrupts or polling done
 
 */
 
@@ -174,6 +164,7 @@ bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
   // Enable interrupts from the I2C0
   NVICISER0 = (1 << 24);
   
+  return true;
 }
 
 
@@ -183,7 +174,7 @@ bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
  */
 void I2C_SelectSlaveDevice(const uint8_t slaveAddress)
 {
-  
+  primarySlaveAddress = saveAddress; 
 }
 
 

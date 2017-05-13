@@ -269,10 +269,8 @@ bool HandleModePacket(void)
     switch (Packet_Parameter2)
 	{
 	  case 0:
-	    PIT_Enable(false);
 	    return Accel_SetMode(ACCEL_POLL);
       case 1:
-	    PIT_Enable(true);
 	    return Accel_SetMode(ACCEL_INT);
       default:
 	    return false;
@@ -393,10 +391,27 @@ void FTM0Callback(void* arg)
  */
 void AccelCallback(void* arg)
 {
-  TAccelData accelData; // union to save data from the accelerometer readings
+  // array of 3 unions and one separate union to save data from the accelerometer readings
+  // saves data from the three most recent Accel_ReadXYZ calls to allow for median filtering
+  TAccelData accelData[3];
+  TAccelData medianData;
   
-  Accel_ReadXYZ(accelData->Bytes);
-  Packet_Put(CMD_ACCEL, accelData.bytes[0], accelData.bytes[1], accelData.bytes[2]);
+  // shifts data in the array unions back (index 0 is most recent data, 2 is oldest data)
+  for (uint8_t i = 0; i < 3; i++)
+  {
+	accelData[2].bytes[i] = accelData[1].bytes[i];
+    accelData[1].bytes[i] = accelData[0].bytes[i];
+  }
+
+  Accel_ReadXYZ(&accelData[0].bytes);
+  
+  // Median filters the last 3 sets of XYZ data
+  for (uint8_t i = 0; i < 3; i++)
+  {
+    medianData.bytes[i] = MedianFilter3(accelData[0].bytes[i], accelData[1].bytes[i], accelData[2].bytes[i]);
+  }
+  
+  Packet_Put(CMD_ACCEL, medianData.bytes[0], medianData.bytes[1], medianData.bytes[2]);
 }
  
 /*! @brief User callback function for the I2C data complete
@@ -455,9 +470,8 @@ int main(void)
       RTC_Init(RTCCallback, NULL) &&
 	  Accel_Init(accelSetup))
   {
-	// Sets PIT to frequency of 1.56Hz
-    PIT_Set(641025641, true);
-    PIT_Enable(true);
+    // PIT_Set(500000000, true);
+    // PIT_Enable(true);
     LEDs_On(LED_ORANGE);
     HandleStartupPacket();
 	

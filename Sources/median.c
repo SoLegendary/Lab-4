@@ -24,4 +24,7 @@ uint8_t Median_Filter3(const uint8_t n1, const uint8_t n2, const uint8_t n3)
 	
 	if ((n3 >= n1 && n3 <= n2) || (n3 <= n1 && n3 >= n2))
 	  return n3;
+  
+    else
+	  return n1; // n1 will be the most recent data, incase that n2 or n3 are NULL
 }

@@ -219,7 +219,22 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
   if(!I2C_Init(aI2CModule, moduleClk))
     return false;
   
-  // Possibly use I2C_Write() here to write any initialising registers on the accelerometer 
+  // Remember that software cannot directly read or write registers on the accelerometer, and
+  // must go through the I2C, so I2C_Write and I2C_IntRead/PollRead are used to do this
+  
+  // Setting fast-read bit for 8-bit data resolution
+  // set F_READ bit in CTRL_REG1
+  
+  // Enable data ready interrupts and route them through the INT1 pin (tied to PTB4)
+  // set INT_EN_DRDY bit in CTRL_REG4
+  // set INT_CFG_DRDY bit in CTRL_REG5
+  
+  // Set sampling frequency to 1.56Hz
+  // set DR[2:0] in CTRL_REG1 to 1:1:1
+  
+  // Set high resolution moode - might not be needed (uses a lot of power)
+  // set MODS[1:0] in CTRL_REG2 to 1:0
+  
   
   // Saving callback function pointers and arguments
   dataReadyCallbackFunction  = accelSetup->dataReadyCallbackFunction;
