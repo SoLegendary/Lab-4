@@ -63,6 +63,7 @@
 volatile uint16union_t *towerNumber = NULL; // Currently set tower number and mode
 volatile uint16union_t *towerMode   = NULL;
 
+bool synchronousMode = true; // variable to track current I2C mode (synchronous by default)
 
 
 // Function Initializations
@@ -262,15 +263,15 @@ bool HandleSetTimePacket(void)
  */
 bool HandleModePacket(void)
 {
-  static bool synchronousMode = true; // variable to track current I2C mode (synchronous by default)
-	
   if (Packet_Parameter1 == 0x02) // If the packet is for SET change the mode using Accel_SetMode()
   {
     switch (Packet_Parameter2)
 	{
 	  case 0:
+	    synchronousMode = false;
 	    return Accel_SetMode(ACCEL_POLL);
       case 1:
+	    synchronousMode = true;
 	    return Accel_SetMode(ACCEL_INT);
       default:
 	    return false;
@@ -393,7 +394,7 @@ void AccelCallback(void* arg)
 {
   // array of 3 unions and one separate union to save data from the accelerometer readings
   // saves data from the three most recent Accel_ReadXYZ calls to allow for median filtering
-  TAccelData accelData[3];
+  static TAccelData accelData[3];
   TAccelData medianData;
   
   // shifts data in the array unions back (index 0 is most recent data, 2 is oldest data)
@@ -479,9 +480,12 @@ int main(void)
 
     for (;;)
     {
-      if (Packet_Get()) //If a packet is received.
-        HandlePacket(); //Handle the packet appropriately.
-      // UART_Poll(); //Continue polling the UART for activity - uncomment for use in Lab 1 or 2
+      if (Packet_Get()) // If a packet is received.
+        HandlePacket(); // Handle the packet appropriately.
+      // UART_Poll(); // Continue polling the UART for activity - uncomment for use in Lab 1 or 2
+	  
+	  if (!synchronousMode)
+		AccelCallback(NULL); // If I2C is in polling mode, keep polling here for new data
     }
   }
 

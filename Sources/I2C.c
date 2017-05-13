@@ -36,6 +36,10 @@ typedef struct
   void* readCompleteCallbackArguments;          /*!< The user's read complete callback function arguments. */
 } TI2CModule;
 
+uint8_t primarySlaveAddress = 0; // private global variable to track accelerometer slave address
+uint8_t slaveAddressWrite   = 0; // write mode address has first bit set
+uint8_t slaveAddressRead    = 0; // read mode address has first bit cleared
+
 
 // private function to return the SCL divider value that matches the current ICR value
 static uint16_t SCLDivider(uint8_t icr)
@@ -97,7 +101,6 @@ static uint16_t SCLDivider(uint8_t icr)
 }
 
 
-uint8_t primarySlaveAddress = 0; // use this private global to keep track of slave address instead of 
 
 
 /*! @brief Sets up the I2C before first use.
@@ -156,6 +159,10 @@ bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
   I2C0_F |= I2C_F_MULT(multSave);
   I2C0_F |= I2C_F_ICR(icrSave);
   
+  // Enabling fast transmit ACK signals
+  //I2C0_C1  |= I2C0_C1_TXAK_MASK;
+  //I2C0_SMB |= I2C0_SMB_FACK_MASK;
+  
   // Setting up NVIC for I2C0 see K70 manual pg 97
   // Vector=40, IRQ=24
   // NVIC non-IPR=0 IPR=6
@@ -168,13 +175,19 @@ bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
 }
 
 
+
 /*! @brief Selects the current slave device
  *
  * @param slaveAddress The slave device address.
  */
 void I2C_SelectSlaveDevice(const uint8_t slaveAddress)
 {
-  primarySlaveAddress = saveAddress; 
+  primarySlaveAddress = slaveAddress; 
+  
+  slaveAddress |= 0x1;
+  slaveAddressWrite = slaveAddress; // write mode address has first bit set
+  slaveAddress &= ~0x1;
+  slaveAddressRead  = slaveAddress; // read mode address has first bit cleared
 }
 
 
@@ -193,13 +206,18 @@ void I2C_SelectSlaveDevice(const uint8_t slaveAddress)
  */
 void I2C_Write(const uint8_t registerAddress, const uint8_t data)
 {
+  // Send slave address + write (Tx mode) (bit[0] == 1) (with START signal)
+	
   while (I2C0_S & I2C_S_BUSY_MASK){;} // wait until bus is idle
   
   I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
   
-  // Send slave address + write (Tx mode) (bit[0] == 1) (with START signal)
-  // Send register address (from private global sent to the I2C0_D reg)
-  // Send data (one byte)
+  I2C0_C1 |= I2C_C1_MST_MASK; // START signal
+  I2C0_D  = SlaveAddressWrite;
+  // Handle ACK/NAK between every byte?
+  I2C0_D  = registerAddress;
+  I2C0_D  = data;
+  I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
 }
 
 
@@ -254,7 +272,9 @@ void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8
  */
 void __attribute__ ((interrupt)) I2C_ISR(void)
 {
-  
+  // clear IICIF
+  // callback function
+  // may need to follow 55-42 flowchart
 }
 
 

@@ -193,7 +193,7 @@ static union
 void (*dataReadyCallbackFunction)(void*) = 0;
 void *dataReadyCallbackArguments         = 0;
 
-bool interruptMode = false; // private global to track whether we are in polling or interrupt mode
+bool synchronousMode = true; // private global to track whether we are in polling or interrupt mode
 
 
 
@@ -258,11 +258,10 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
  */
 void Accel_ReadXYZ(uint8_t data[3])
 {
-  // if (interruptMode == false)
-  // I2C_PollRead() to get xyz data
-
-  // if (interruptMode == true)
-  // I2C_IntRead() to get xyz data
+  if(synchronousMode)
+    I2C_IntRead(const uint8_t registerAddress, data, const uint8_t nbBytes);
+  else
+	I2C_PollRead(const uint8_t registerAddress, data, const uint8_t nbBytes);
 }
 
 
@@ -272,11 +271,20 @@ void Accel_ReadXYZ(uint8_t data[3])
  */
 void Accel_SetMode(const TAccelMode mode)
 {
-  // if (mode == polling)
-  // I2C_Write() to disable interrupts and set a global private variable here to false
-
-  // if (mode == interrupts)
-  // I2C_Write() to enable interrupts and set a global private variable here to true
+  switch (mode)
+  {
+	case ACCEL_POLL:
+	  synchronousMode = false;
+      // clear INT_EN_DRDY bit in CTRL_REG4
+      // clear INT_CFG_DRDY bit in CTRL_REG5
+	  break;
+	
+	case ACCEL_INT:
+	  synchronousMode = true;
+      // set INT_EN_DRDY bit in CTRL_REG4
+      // set INT_CFG_DRDY bit in CTRL_REG5
+	  break;
+  }
 }
 
 
