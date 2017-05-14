@@ -222,8 +222,6 @@ void I2C_Write(const uint8_t registerAddress, const uint8_t data)
   
   I2C0_D  = data;
   
-  
-  
   I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
 }
 
@@ -235,6 +233,8 @@ void I2C_Write(const uint8_t registerAddress, const uint8_t data)
  * @param registerAddress The register address.
  * @param data A pointer to store the bytes that are read.
  * @param nbBytes The number of bytes to read.
+ 
+ // asynchronous mode where freq = 1Hz and only returns packets when XYZ data has changed
  */
 void I2C_PollRead(const uint8_t registerAddress, uint8_t* const data, const uint8_t nbBytes)
 {
@@ -246,24 +246,24 @@ void I2C_PollRead(const uint8_t registerAddress, uint8_t* const data, const uint
   I2C0_D  = SlaveAddressWrite;
   I2C0_D  = registerAddress;
   
+  I2C0_C1 &= ~I2C_C1_TX_MASK; // I2C is in Rx mode (read)
+  
   for (; nbBytes > 0; --nbBytes)
   {
     I2C0_D  = SlaveAddressRead;
     *data = I2C0_D; // store reg data in pointer
+	
+	//if (error in data - maybe if data is not new?) // if there is an error, send NACK to slave device and stop transmission
+	//{
+	//  I2C0_C1 |= I2C_C1_TXAK_MASK;
+	//  break;
+	//}
 	
 	if (nbBytes > 0)
 	  I2C0_C1 |= I2C_C1_RSTA_MASK; // RESTART signal
   }
   
   I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
-  
-  
-  // Send slave address + write (Tx mode) (bit[0] == 1) (with START signal)
-  // Send register address (from private global sent to the I2C0_D reg)
-  // Send slave address + read (Rx mode) (with REPEATED START signal - or STOP signal if last bit)
-  // for (; nbBytes > 0; nbBytes--){repeat last step;}
-  
-  // asynchronous mode where freq = 1Hz and only returns packets when XYZ data has changed
 }
 
 
@@ -274,6 +274,8 @@ void I2C_PollRead(const uint8_t registerAddress, uint8_t* const data, const uint
  * @param registerAddress The register address.
  * @param data A pointer to store the bytes that are read.
  * @param nbBytes The number of bytes to read.
+ 
+ // synchronous mode where freq = 1.56Hz and always returns packets whether or not XYZ data has changed
  */
 void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8_t nbBytes)
 {
@@ -281,7 +283,8 @@ void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8
   
   I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
   
-  // synchronous mode where freq = 1.56Hz and always returns packets whether or not XYZ data has changed
+  
+  
 }
 
 
