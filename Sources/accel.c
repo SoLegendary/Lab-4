@@ -302,7 +302,8 @@ void Accel_SetMode(const TAccelMode mode)
  */
 void __attribute__ ((interrupt)) AccelDataReady_ISR(void)
 {
-  // SRC_DRDY flag is the data ready interrupt flag
+  // clear SRC_DRDY flag in CTRL_REG1
+  // callback function
 }
 
 

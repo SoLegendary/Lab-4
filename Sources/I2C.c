@@ -184,6 +184,7 @@ void I2C_SelectSlaveDevice(const uint8_t slaveAddress)
 {
   primarySlaveAddress = slaveAddress; 
   
+  slaveAddress == (slaveAddress << 1)
   slaveAddress |= 0x1;
   slaveAddressWrite = slaveAddress; // write mode address has first bit set
   slaveAddress &= ~0x1;
@@ -214,9 +215,15 @@ void I2C_Write(const uint8_t registerAddress, const uint8_t data)
   
   I2C0_C1 |= I2C_C1_MST_MASK; // START signal
   I2C0_D  = SlaveAddressWrite;
-  // Handle ACK/NAK between every byte?
   I2C0_D  = registerAddress;
+  
+  //if (I2C0_S & I2C_S_RXAK_MASK) // No ACK received after byte transfer
+  //  I2C0_C1 &= ~I2C_C1_MST_MASK; // end the transfer
+  
   I2C0_D  = data;
+  
+  
+  
   I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
 }
 
@@ -234,6 +241,22 @@ void I2C_PollRead(const uint8_t registerAddress, uint8_t* const data, const uint
   while (I2C0_S & I2C_S_BUSY_MASK){;} // wait until bus is idle
   
   I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
+  
+  I2C0_C1 |= I2C_C1_MST_MASK; // START signal
+  I2C0_D  = SlaveAddressWrite;
+  I2C0_D  = registerAddress;
+  
+  for (; nbBytes > 0; --nbBytes)
+  {
+    I2C0_D  = SlaveAddressRead;
+    *data = I2C0_D; // store reg data in pointer
+	
+	if (nbBytes > 0)
+	  I2C0_C1 |= I2C_C1_RSTA_MASK; // RESTART signal
+  }
+  
+  I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
+  
   
   // Send slave address + write (Tx mode) (bit[0] == 1) (with START signal)
   // Send register address (from private global sent to the I2C0_D reg)
