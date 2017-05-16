@@ -193,7 +193,7 @@ static union
 void (*dataReadyCallbackFunction)(void*) = 0;
 void *dataReadyCallbackArguments         = 0;
 
-bool synchronousMode = true; // private global to track whether we are in polling or interrupt mode
+static bool synchronousMode = false; // private global to track whether we are in polling or interrupt mode
 
 
 
@@ -205,37 +205,44 @@ bool synchronousMode = true; // private global to track whether we are in pollin
  */
 bool Accel_Init(const TAccelSetup* const accelSetup)
 {
-  // Accelerometer is connected to PORTB pin 4 (see tower schematics)
+  // Accelerometer is connected to PORTB pin 4 via INT1 (see tower schematics)
   SIM_SCGC5 |= SIM_SCGC5_PORTB_MASK;
+  // Accelerometer is connected to PORTE pins 18-19 via SDA and SCL (see tower schematics)
+  SIM_SCGC5 |= SIM_SCGC5_PORTE_MASK;
+  PORTE_PCR18 |= PORT_PCR_MUX(4); // ALT4 in the pin MUX -> I2C0_SDA
+  PORTE_PCR19 |= PORT_PCR_MUX(4); // ALT4 in the pin MUX -> I2C0_SCL
+
 	
   // Initialising I2C which controls the accelerometer
   // Using a TI2CModule struct defined in I2C.h
   TI2CModule aI2CModule;
-  aI2CModule->primarySlaveAddress           = 0x1C; // address 0011100 (see accelerometer manual pg. 17) - requires pin 7 (SA0) to be low logic level
-  aI2CModule->baudRate                      = 100000;
-  aI2CModule->readCompleteCallbackFunction  = accelSetup->readCompleteCallbackFunction;
-  aI2CModule->readCompleteCallbackArguments = accelSetup->readCompleteCallbackArguments;
+  aI2CModule.primarySlaveAddress           = 0x1C; // address 0011100 (see accelerometer manual pg. 17) - requires pin 7 (SA0) to be low logic level
+  aI2CModule.baudRate                      = 100000;
+  aI2CModule.readCompleteCallbackFunction  = accelSetup->readCompleteCallbackFunction;
+  aI2CModule.readCompleteCallbackArguments = accelSetup->readCompleteCallbackArguments;
   
-  if(!I2C_Init(aI2CModule, moduleClk))
+  if(!I2C_Init(&aI2CModule, accelSetup->moduleClk))
     return false;
   
-  // Remember that software cannot directly read or write registers on the accelerometer, and
-  // must go through the I2C, so I2C_Write and I2C_IntRead/PollRead are used to do this
+  // Remember that software cannot directly write registers on the accelerometer, and 
+  // must go through the I2C, so I2C_Write is used to do this one register at a time
   
   // Setting fast-read bit for 8-bit data resolution
   // set F_READ bit in CTRL_REG1
-  
-  // Enable data ready interrupts and route them through the INT1 pin (tied to PTB4)
-  // set INT_EN_DRDY bit in CTRL_REG4
-  // set INT_CFG_DRDY bit in CTRL_REG5
-  
   // Set sampling frequency to 1.56Hz
   // set DR[2:0] in CTRL_REG1 to 1:1:1
+  I2C_Write(ADDRESS_CTRL_REG1, 0x3A); // writing 00111010
   
   // Set high resolution moode - might not be needed (uses a lot of power)
   // set MODS[1:0] in CTRL_REG2 to 1:0
+  // I2C_Write(ADDRESS_CTRL_REG2, 0x2);
   
-  
+  // Allow data ready interrupts - set INT_EN_DRDY bit in CTRL_REG4
+  I2C_Write(ADDRESS_CTRL_REG4, 0x1);
+  // route them through the INT1 pin (tied to PTB4) - set INT_CFG_DRDY bit in CTRL_REG5
+  I2C_Write(ADDRESS_CTRL_REG5, 0x1); 
+
+
   // Saving callback function pointers and arguments
   dataReadyCallbackFunction  = accelSetup->dataReadyCallbackFunction;
   dataReadyCallbackArguments = accelSetup->dataReadyCallbackArguments;
@@ -258,10 +265,25 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
  */
 void Accel_ReadXYZ(uint8_t data[3])
 {
-  if(synchronousMode)
-    I2C_IntRead(const uint8_t registerAddress, data, const uint8_t nbBytes);
+  // array of 3 unions and one separate union to save data from the accelerometer readings
+  // saves data from the three most recent Accel_ReadXYZ calls to allow for median filtering
+  static TAccelData accelData[3];
+
+  // shifts data in the array unions back (index 0 is most recent data, 2 is oldest data)
+  for (uint8_t i = 0; i < 3; i++)
+  {
+    accelData[2].bytes[i] = accelData[1].bytes[i];
+    accelData[1].bytes[i] = accelData[0].bytes[i];
+  }
+
+  if (synchronousMode) //call Int or PollRead based on current mode to populate the newest data index
+    I2C_IntRead(ADDRESS_OUT_X_MSB, accelData[0].bytes, 3);
   else
-	I2C_PollRead(const uint8_t registerAddress, data, const uint8_t nbBytes);
+    I2C_PollRead(ADDRESS_OUT_X_MSB, accelData[0].bytes, 3);
+
+  // Median filters the last 3 sets of XYZ data
+  for (uint8_t i = 0; i < 3; i++)
+    data[i] = Median_Filter3(accelData[0].bytes[i], accelData[1].bytes[i], accelData[2].bytes[i]);
 }
 
 
@@ -273,17 +295,15 @@ void Accel_SetMode(const TAccelMode mode)
 {
   switch (mode)
   {
-	case ACCEL_POLL:
-	  synchronousMode = false;
-      // clear INT_EN_DRDY bit in CTRL_REG4
-      // clear INT_CFG_DRDY bit in CTRL_REG5
-	  break;
+	  case ACCEL_POLL: // disable data ready interrupts
+	    I2C_Write(ADDRESS_CTRL_REG4, 0x0);
+	    synchronousMode = false;
+	    break;
 	
-	case ACCEL_INT:
-	  synchronousMode = true;
-      // set INT_EN_DRDY bit in CTRL_REG4
-      // set INT_CFG_DRDY bit in CTRL_REG5
-	  break;
+	  case ACCEL_INT: // enable data ready interrupts
+	    I2C_Write(ADDRESS_CTRL_REG4, 0x1);
+	    synchronousMode = true;
+	    break;
   }
 }
 
@@ -296,14 +316,17 @@ void Accel_SetMode(const TAccelMode mode)
  *  @note Assumes the accelerometer has been initialized.
  *
  *  Triggers only when data is ready to be read (see accel manual for the interrupt flag)
- *  Do not confuse data ready (which is a register flag) with actual XYZ values changing (interrupt mode doesn't care if they changed or not)
- *  Callback calls Accel_ReadXYZ to get this data
- *  Once the communication from Accel_ReadXYZ is done, I2C_ISR will be triggered
+ *  Do not confuse data ready (which is a register flag) with actual XYZ values changing
+ *  (interrupt mode doesn't care if they changed or not)
  */
 void __attribute__ ((interrupt)) AccelDataReady_ISR(void)
 {
-  // clear SRC_DRDY flag in CTRL_REG1
-  // callback function
+  // clear SRC_DRDY flag in INT_SOURCE reg
+  I2C_Write(ADDRESS_INT_SOURCE, 0x3A);
+  
+  // Callback function
+  if (dataReadyCallbackFunction)
+    (*dataReadyCallbackFunction)(dataReadyCallbackArguments);
 }
 
 

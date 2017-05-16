@@ -41,6 +41,7 @@
 #include "RTC.h"
 #include "PIT.h"
 #include "FTM.h"
+#include "accel.h"
 #include "PE_Types.h"
 #include "PE_Error.h"
 #include "PE_Const.h"
@@ -63,7 +64,10 @@
 volatile uint16union_t *towerNumber = NULL; // Currently set tower number and mode
 volatile uint16union_t *towerMode   = NULL;
 
-bool synchronousMode = true; // variable to track current I2C mode (synchronous by default)
+static TAccelData accelDataOld; // oldest XYZ accelerometer data - only used in asynchronous polling mode
+static TAccelData accelDataNew; // latest XYZ accelerometer data
+
+static bool synchronousMode = false; // variable to track current I2C mode (synchronous by default)
 
 
 // Function Initializations
@@ -112,7 +116,8 @@ bool HandleStartupPacket(void)
   return ((Packet_Put(CMD_STARTUP, 0x00, 0x00, 0x00)) &&
 	  (Packet_Put(CMD_VERSION, 'v', 0x01, 0x00)) &&
 	  (Packet_Put(CMD_NUMBER, 0x01, towerNumber->s.Lo, towerNumber->s.Hi)) &&
-	  (Packet_Put(CMD_TOWERMODE, 0x01, towerMode->s.Lo, towerMode->s.Hi)));
+	  (Packet_Put(CMD_TOWERMODE, 0x01, towerMode->s.Lo, towerMode->s.Hi)) &&
+	  (Packet_Put(CMD_MODE, 0x01, synchronousMode, 0x00)));
 }
 
 
@@ -266,16 +271,19 @@ bool HandleModePacket(void)
   if (Packet_Parameter1 == 0x02) // If the packet is for SET change the mode using Accel_SetMode()
   {
     switch (Packet_Parameter2)
-	{
-	  case 0:
-	    synchronousMode = false;
-	    return Accel_SetMode(ACCEL_POLL);
+	  {
+	    case 0:
+	      synchronousMode = false;
+	      Accel_SetMode(ACCEL_POLL);
+	      return true;
       case 1:
-	    synchronousMode = true;
-	    return Accel_SetMode(ACCEL_INT);
+	      synchronousMode = true;
+	      Accel_SetMode(ACCEL_INT);
+	      return true;
       default:
-	    return false;
-	}
+	      return false;
+	  }
+
   }
   
   else if (Packet_Parameter1 == 0x01) // If the packet is for GET, just return the current mode
@@ -388,42 +396,40 @@ void FTM0Callback(void* arg)
 }
 
 /*! @brief User callback function for the accelerometer data reading
- *  After data is ready to be read, call Accel_ReadXYZ and save its data and send it back to the PC
+ *  After data is ready to be read, call Accel_ReadXYZ and save its data
  */
 void AccelCallback(void* arg)
 {
-  // array of 3 unions and one separate union to save data from the accelerometer readings
-  // saves data from the three most recent Accel_ReadXYZ calls to allow for median filtering
-  static TAccelData accelData[3];
-  TAccelData medianData;
-  
-  // shifts data in the array unions back (index 0 is most recent data, 2 is oldest data)
-  for (uint8_t i = 0; i < 3; i++)
-  {
-	accelData[2].bytes[i] = accelData[1].bytes[i];
-    accelData[1].bytes[i] = accelData[0].bytes[i];
-  }
-
-  Accel_ReadXYZ(&accelData[0].bytes);
-  
-  // Median filters the last 3 sets of XYZ data
-  for (uint8_t i = 0; i < 3; i++)
-  {
-    medianData.bytes[i] = MedianFilter3(accelData[0].bytes[i], accelData[1].bytes[i], accelData[2].bytes[i]);
-  }
-  
-  Packet_Put(CMD_ACCEL, medianData.bytes[0], medianData.bytes[1], medianData.bytes[2]);
+  Accel_ReadXYZ(accelDataNew.bytes);
 }
  
 /*! @brief User callback function for the I2C data complete
- *  After data read from AccelCallback, I2C_ISR is triggered to toggle the green LED 
+ *  After data read from AccelCallback, I2C_ISR is triggered to send the packet to PC and toggle the green LED
  */
 void I2CCallback(void* arg)
 {
+  Packet_Put(CMD_ACCEL, accelDataNew.bytes[0], accelDataNew.bytes[1], accelDataNew.bytes[2]);
   LEDs_Toggle(LED_GREEN);
 }
 
+void AccelPoll(void)
+{
+  // shift new data into old before getting new data
+  accelDataOld.bytes[0] = accelDataNew.bytes[0];
+  accelDataOld.bytes[1] = accelDataNew.bytes[1];
+  accelDataOld.bytes[2] = accelDataNew.bytes[2];
 
+  Accel_ReadXYZ(accelDataNew.bytes);
+
+  // If any axes are new, send the packet and toggle green LED
+  if((accelDataOld.bytes[0] != accelDataNew.bytes[0]) ||
+     (accelDataOld.bytes[1] != accelDataNew.bytes[1]) ||
+     (accelDataOld.bytes[2] != accelDataNew.bytes[2]))
+  {
+    Packet_Put(CMD_ACCEL, accelDataNew.bytes[0], accelDataNew.bytes[1], accelDataNew.bytes[2]);
+    LEDs_Toggle(LED_GREEN);
+  }
+}
 
 
 
@@ -468,24 +474,30 @@ int main(void)
       FTM_Init() &&
       FTM_Set(&FTM0Channel0) &&
       PIT_Init(CPU_BUS_CLK_HZ, PITCallback, NULL) && 
-      RTC_Init(RTCCallback, NULL) &&
-	  Accel_Init(accelSetup))
+      // RTC_Init(RTCCallback, NULL) &&
+	    Accel_Init(&accelSetup))
   {
     // PIT_Set(500000000, true);
     // PIT_Enable(true);
+
     LEDs_On(LED_ORANGE);
     HandleStartupPacket();
 	
+    // Polling mode by default for accelerometer
+    synchronousMode = false;
+    Accel_SetMode(ACCEL_POLL);
+
     __EI(); // Enable interrupts
+
 
     for (;;)
     {
       if (Packet_Get()) // If a packet is received.
         HandlePacket(); // Handle the packet appropriately.
       // UART_Poll(); // Continue polling the UART for activity - uncomment for use in Lab 1 or 2
-	  
-	  if (!synchronousMode)
-		AccelCallback(NULL); // If I2C is in polling mode, keep polling here for new data
+
+	    if (!synchronousMode)
+	      AccelPoll();
     }
   }
 

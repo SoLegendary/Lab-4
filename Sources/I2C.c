@@ -23,26 +23,20 @@ NOT the frequency of any interrupts or polling done
 
 #include "types.h"
 #include "I2C.h"
+#include "MK70F12.h"
 
 // Private global variables for user callback function and its arguments
-void (*I2CCallback)(void*) = 0;
-void *I2CCallbackArg       = 0;
+void (*readCompleteCallbackFunction)(void*) = 0;
+void *readCompleteCallbackArguments         = 0;
 
-typedef struct
-{
-  uint8_t primarySlaveAddress;
-  uint32_t baudRate;
-  void (*readCompleteCallbackFunction)(void*);  /*!< The user's read complete callback function. */
-  void* readCompleteCallbackArguments;          /*!< The user's read complete callback function arguments. */
-} TI2CModule;
 
-uint8_t primarySlaveAddress = 0; // private global variable to track accelerometer slave address
-uint8_t slaveAddressWrite   = 0; // write mode address has first bit set
-uint8_t slaveAddressRead    = 0; // read mode address has first bit cleared
+static uint8_t primarySlaveAddress = 0; // private global variable to track accelerometer slave address
+static uint8_t slaveAddressWrite   = 0; // write mode address has first bit set
+static uint8_t slaveAddressRead    = 0; // read mode address has first bit cleared
 
 
 // private function to return the SCL divider value that matches the current ICR value
-static uint16_t SCLDivider(uint8_t icr)
+static uint16_t sclDivider(uint8_t icr)
 {
   // icr determines SCL divider (see K70 manual pg. 1885)
   switch (icr)
@@ -109,20 +103,22 @@ static uint16_t SCLDivider(uint8_t icr)
  *  @param moduleClk The module clock in Hz.
  *  @return BOOL - TRUE if the I2C module was successfully initialized.
  */
-bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
+bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk)
 {
   // System clock gate enable
   SIM_SCGC4 |= SIM_SCGC4_IIC0_MASK;
 	
-  // I2C enable and interrupt enable
+  // I2C enable and interrupt enable for read completions
   I2C0_C1 |= I2C_C1_IICEN_MASK;
   I2C0_C1 |= I2C_C1_IICIE_MASK;
 	
   // Saving primary slave address and callback function + arguments into private global variables
-  primarySlaveAddress = aI2CModule->primarySlaveAddress;
-  I2CCallback         = aI2CModule->readCompleteCallbackFunction;
-  I2CCallbackArg      = aI2CModule->readCompleteCallbackArguments;
+  I2C_SelectSlaveDevice(aI2CModule->primarySlaveAddress);
+  readCompleteCallbackFunction  = aI2CModule->readCompleteCallbackFunction;
+  readCompleteCallbackArguments = aI2CModule->readCompleteCallbackArguments;
 	
+
+  uint8_t mult; // value to use in baud rate formula
   uint8_t multSave; // saves the best value for the mult register
   uint8_t icrSave; // saves the best value for the icr register
   uint32_t baudRateError; // baud rate error for current combination of mult and icr in the loop
@@ -130,30 +126,30 @@ bool I2C_Init(const TI2CModule* const aI2CModule, const uint32_t moduleClk);
   
   for (uint8_t multReg = 0; multReg < 3; multReg++)
   {
-	switch (multReg) // mult is used in the formula for baud rate, 
-	{                // whereas multReg is the value to be written into the MULT register
-	  case 0:
-	    mult = 1;
-		break;
-	  case 1:
-	    mult = 2;
-		break;
-	  case 2:
-	    mult = 4;
-		break;
-	}
+	  switch (multReg) // mult is used in the formula for baud rate,
+	  {                // whereas multReg is the value to be written into the MULT register
+	    case 0:
+	      mult = 1;
+	    	break;
+	    case 1:
+	      mult = 2;
+		    break;
+	    case 2:
+	      mult = 4;
+	  	  break;
+  	}
 	
-	for (uint8_t icr = 10; icr <= 0x3F; icr++)
-	{
-	  baudRateError = aI2CModule->baudRate - (moduleClk/(mult*SCLDivider(icr)));
-	
-	  if (baudRateError < baudRateErrorMin)
+	  for (uint8_t icr = 10; icr <= 0x3F; icr++)
 	  {
-		baudRateErrorMin = baudRateError;
-		multSave = multReg;
-		icrSave = icr;
+	    baudRateError = aI2CModule->baudRate - (moduleClk/(mult*sclDivider(icr)));
+
+	    if (baudRateError < baudRateErrorMin)
+	    {
+		    baudRateErrorMin = baudRateError;
+		    multSave = multReg;
+		    icrSave = icr;
+	    }
 	  }
-	}
   }
   // Write in register values for the most accurate baud rate
   I2C0_F |= I2C_F_MULT(multSave);
@@ -184,45 +180,54 @@ void I2C_SelectSlaveDevice(const uint8_t slaveAddress)
 {
   primarySlaveAddress = slaveAddress; 
   
-  slaveAddress == (slaveAddress << 1)
-  slaveAddress |= 0x1;
-  slaveAddressWrite = slaveAddress; // write mode address has first bit set
-  slaveAddress &= ~0x1;
-  slaveAddressRead  = slaveAddress; // read mode address has first bit cleared
+  slaveAddressWrite = (slaveAddress << 1);
+  slaveAddressWrite |= 0x1; // write mode address has first bit set
+
+  slaveAddressRead = (slaveAddress << 1);
+  slaveAddressRead &= ~0x1; // read mode address has first bit cleared
 }
 
 
 
-// Any call to I2C read or writes must follow the communication protocol on pg 1885 of the K70 manual.
-// Send out slave address with rightmost bit 1 to write or 0 to read
-// In I2C.c, keep a private global variable with the slave address, changed only via I2C_SelectSlaveDevice
-// STOP, START, RESTART signals are sent by writing to the C1 register (Master Mode on/off and REPEAT START)
-// EVERY signal or send/receive data, an ACK/NAK must be sent to or received from the slave device
-// If NAK is read, you can either STOP to end the communication, or RESTART to try again
+
 
 /*! @brief Write a byte of data to a specified register
  *
  * @param registerAddress The register address.
  * @param data The 8-bit data to write.
+ *
+ * @note follows pg. 19 of accelerometer manual - single-byte write
+ * MAYBE put this in the form of a switch() inside a for() loop and add in returns + clear I2C0_D in case of NAK
  */
 void I2C_Write(const uint8_t registerAddress, const uint8_t data)
 {
-  // Send slave address + write (Tx mode) (bit[0] == 1) (with START signal)
-	
-  while (I2C0_S & I2C_S_BUSY_MASK){;} // wait until bus is idle
-  
-  I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
+  while (I2C0_S & I2C_S_BUSY_MASK){;} // wait until bus is idle - maybe also wait after each byte sent?
   
   I2C0_C1 |= I2C_C1_MST_MASK; // START signal
-  I2C0_D  = SlaveAddressWrite;
-  I2C0_D  = registerAddress;
-  
-  //if (I2C0_S & I2C_S_RXAK_MASK) // No ACK received after byte transfer
-  //  I2C0_C1 &= ~I2C_C1_MST_MASK; // end the transfer
-  
-  I2C0_D  = data;
+  I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
+
+  for (uint8_t i = 0; i < 3; i++)
+  {
+	switch (i)
+	{
+	  case 0:
+	    I2C0_D = slaveAddressWrite; // send accelerometer address with R/W bit set to Write
+		break;
+	  case 1:
+	    I2C0_D = registerAddress; // send address of register to be written
+		break;
+	  case 2:
+	    I2C0_D = data; // send data to write into register
+		break;
+	}
+	
+	if (I2C0_S & I2C_S_RXAK_MASK) // if no AK received, end the communication
+      break;
+  }
   
   I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
+
+  // I2C0_D = 0; // clear data register (maybe lack of this is why some Write calls get stuck?
 }
 
 
@@ -233,37 +238,51 @@ void I2C_Write(const uint8_t registerAddress, const uint8_t data)
  * @param registerAddress The register address.
  * @param data A pointer to store the bytes that are read.
  * @param nbBytes The number of bytes to read.
- 
- // asynchronous mode where freq = 1Hz and only returns packets when XYZ data has changed
+ *
+ * @note follows pg. 19 of accelerometer manual - multi-byte read
+ *
  */
 void I2C_PollRead(const uint8_t registerAddress, uint8_t* const data, const uint8_t nbBytes)
 {
   while (I2C0_S & I2C_S_BUSY_MASK){;} // wait until bus is idle
   
+  I2C0_C1 &= ~I2C_C1_TXAK_MASK; // AK signal
   I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
   
-  I2C0_C1 |= I2C_C1_MST_MASK; // START signal
-  I2C0_D  = SlaveAddressWrite;
-  I2C0_D  = registerAddress;
-  
-  I2C0_C1 &= ~I2C_C1_TX_MASK; // I2C is in Rx mode (read)
-  
-  for (; nbBytes > 0; --nbBytes)
+  for (uint8_t i = 0; i < (nbBytes + 3); i++)
   {
-    I2C0_D  = SlaveAddressRead;
-    *data = I2C0_D; // store reg data in pointer
+	switch (i)
+	{
+	  case 0:
+	    I2C0_D = slaveAddressWrite; // send accelerometer address with R/W bit set to Write
+		break;
+	  case 1:
+	    I2C0_D = registerAddress; // send address of register to be written
+		break;
+	  case 2:
+	    I2C0_C1 &= ~I2C_C1_TX_MASK; // I2C is in Rx mode (read)
+	    I2C0_C1 |= I2C_C1_RSTA_MASK; // REPEAT START signal
+	    I2C0_D   = slaveAddressRead; // send accelerometer address with R/W bit cleared to Read
+		break;
+	  default:
+	  	if (i == (nbBytes - 1)) // 2nd last byte to be read
+	      I2C0_C1 |= I2C_C1_TXAK_MASK; // NAK signal
+	  
+	    if (i == nbBytes) // last byte to be read
+	      I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
+		
+	    *data = I2C0_D; // place data into pointer
+		data++; // increment data pointer (if it's an array, this effectively increments to the next index)
+	    I2C0_C1 &= ~I2C_C1_TXAK_MASK; // AK signal
+		break;
+	}
 	
-	//if (error in data - maybe if data is not new?) // if there is an error, send NACK to slave device and stop transmission
-	//{
-	//  I2C0_C1 |= I2C_C1_TXAK_MASK;
-	//  break;
-	//}
-	
-	if (nbBytes > 0)
-	  I2C0_C1 |= I2C_C1_RSTA_MASK; // RESTART signal
+	if ((i < 3) && (I2C0_S & I2C_S_RXAK_MASK)) // if no AK received during write stages, end the communication
+      break;
   }
   
-  I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
+  //I2C0_C1 |= I2C_C1_TXAK_MASK; // NAK signal
+  //I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
 }
 
 
@@ -281,10 +300,35 @@ void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8
 {
   while (I2C0_S & I2C_S_BUSY_MASK){;} // wait until bus is idle
   
+  I2C0_C1 &= ~I2C_C1_TXAK_MASK; // AK signal
   I2C0_C1 |= I2C_C1_TX_MASK; // I2C is in Tx mode (write)
   
-  
-  
+  for (uint8_t i = 0; i < (nbBytes + 3); i++)
+  {
+	switch (i)
+	{
+	  case 0:
+	    I2C0_D = slaveAddressWrite; // send accelerometer address with R/W bit set to Write
+		break;
+	  case 1:
+	    I2C0_D = registerAddress; // send address of register to be written
+		break;
+	  case 2:
+	    I2C0_C1 &= ~I2C_C1_TX_MASK; // I2C is in Rx mode (read)
+	    I2C0_C1 |= I2C_C1_RSTA_MASK; // REPEAT START signal
+	    I2C0_D   = slaveAddressRead; // send accelerometer address with R/W bit cleared to Read
+		break;
+	  default:
+	    // ISR should trigger here to test if we need to send NAK or STOP
+	    *data = I2C0_D; // place data into pointer
+		data++; // increment data pointer (if it's an array, this effectively increments to the next index)
+	    I2C0_C1 &= ~I2C_C1_TXAK_MASK; // AK signal
+		break;
+	}
+	
+	if ((i < 3) && (I2C0_S & I2C_S_RXAK_MASK)) // if no AK received during write stages, end the communication
+      break;
+  }
 }
 
 
@@ -298,9 +342,27 @@ void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8
  */
 void __attribute__ ((interrupt)) I2C_ISR(void)
 {
-  // clear IICIF
-  // callback function
-  // may need to follow 55-42 flowchart
+  I2C0_S |= I2C_S_IICIF_MASK; // w1c interrupt flag
+  
+  // Flowchart 55-42 on pg 1896 of K70 manual
+  if (I2C0_C1 & I2C_C1_MST_MASK)
+  {
+    if (I2C0_C1 & ~I2C_C1_TX_MASK); // ISR is only for reading
+    {
+      if (1)//last byte to read)
+        I2C0_C1 &= ~I2C_C1_MST_MASK; // STOP signal
+      else if (1)//2nd last byte to read
+        I2C0_C1 |= I2C_C1_TXAK_MASK;
+      // Read from data reg and store
+    }
+  }
+
+  if (readCompleteCallbackFunction)
+    (*readCompleteCallbackFunction)(readCompleteCallbackArguments);
+  // may need to only be called if last byte to read
+  // maybe send out the data via the callback arguments?
+  // if this is the case, then keep a static counter variable
+  // up in I2CCallback to track whether all axes are done yet
 }
 
 
