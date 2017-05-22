@@ -1,4 +1,4 @@
-/*! @file
+/*! @file median.h
  *
  *  @brief Median filter.
  *
@@ -7,6 +7,11 @@
  *  @author PMcL
  *  @date 2015-10-12
  */
+/*!
+**  @addtogroup main_module main module documentation
+**
+**  @author Thanit Tangson
+*/
 
 #ifndef MEDIAN_H
 #define MEDIAN_H

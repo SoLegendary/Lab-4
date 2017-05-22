@@ -1,4 +1,4 @@
-/*! @file
+/*! @file I2C.h
  *
  *  @brief I/O routines for the K70 I2C interface.
  *
@@ -7,7 +7,11 @@
  *  @author PMcL
  *  @date 2015-09-17
  */
-
+/*!
+**  @addtogroup main_module main module documentation
+**
+**  @author Thanit Tangson
+*/
 #ifndef I2C_H
 #define I2C_H
 
@@ -70,3 +74,4 @@ void I2C_IntRead(const uint8_t registerAddress, uint8_t* const data, const uint8
 void __attribute__ ((interrupt)) I2C_ISR(void);
 
 #endif
+

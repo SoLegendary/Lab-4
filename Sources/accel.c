@@ -2,7 +2,9 @@
  *
  *  @brief HAL for the accelerometer.
  *
- *  This contains the functions for interfacing to the MMA8451Q accelerometer.
+ *  This contains the functions for interfacing to the MMA8451Q accelerometer via
+ *  the I2C module. All register writes and data reads are performed via functions
+ *  included from I2C.h. Also contains address definitions for all accelerometer registers.
  *
  *  @author Thanit Tangson
  *  @date 2017-5-9
@@ -10,8 +12,6 @@
 /*!
 **  @addtogroup main_module main module documentation
 **
-**  @author Thanit Tangson
-**  @{
 */
 
 // Accelerometer functions
@@ -190,33 +190,27 @@ static union
 
 
 
-void (*dataReadyCallbackFunction)(void*) = 0;
-void *dataReadyCallbackArguments         = 0;
+static void (*DataReadyCallbackFunction)(void*) = 0;
+static void *DataReadyCallbackArguments         = 0;
 
-static bool synchronousMode = false; // private global to track whether we are in polling or interrupt mode
-
-
+static bool SynchronousMode = false; // private global to track whether we are in polling or interrupt mode
 
 
-/*! @brief Initializes the accelerometer by calling the initialization routines of the supporting software modules.
- *
- *  @param accelSetup is a pointer to an accelerometer setup structure.
- *  @return bool - TRUE if the accelerometer module was successfully initialized.
- */
+
 bool Accel_Init(const TAccelSetup* const accelSetup)
 {
   // Accelerometer is connected to PORTB pin 4 via INT1 (see tower schematics)
   SIM_SCGC5 |= SIM_SCGC5_PORTB_MASK;
   // Accelerometer is connected to PORTE pins 18-19 via SDA and SCL (see tower schematics)
   SIM_SCGC5 |= SIM_SCGC5_PORTE_MASK;
-  PORTE_PCR18 |= PORT_PCR_MUX(4); // ALT4 in the pin MUX -> I2C0_SDA
-  PORTE_PCR19 |= PORT_PCR_MUX(4); // ALT4 in the pin MUX -> I2C0_SCL
+  PORTE_PCR18 |= PORT_PCR_MUX(4) | PORT_PCR_ODE_MASK; // ALT4 in the pin MUX -> I2C0_SDA
+  PORTE_PCR19 |= PORT_PCR_MUX(4) | PORT_PCR_ODE_MASK; // ALT4 in the pin MUX -> I2C0_SCL
 
 	
   // Initialising I2C which controls the accelerometer
   // Using a TI2CModule struct defined in I2C.h
   TI2CModule aI2CModule;
-  aI2CModule.primarySlaveAddress           = 0x1C; // address 0011100 (see accelerometer manual pg. 17) - requires pin 7 (SA0) to be low logic level
+  aI2CModule.primarySlaveAddress           = 0x1D; // address 0011101 (see accelerometer manual pg. 17) - requires pin 7 (SA0) to be high logic level
   aI2CModule.baudRate                      = 100000;
   aI2CModule.readCompleteCallbackFunction  = accelSetup->readCompleteCallbackFunction;
   aI2CModule.readCompleteCallbackArguments = accelSetup->readCompleteCallbackArguments;
@@ -224,28 +218,24 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
   if(!I2C_Init(&aI2CModule, accelSetup->moduleClk))
     return false;
   
-  // Remember that software cannot directly write registers on the accelerometer, and 
-  // must go through the I2C, so I2C_Write is used to do this one register at a time
   
-  // Setting fast-read bit for 8-bit data resolution
-  // set F_READ bit in CTRL_REG1
-  // Set sampling frequency to 1.56Hz
-  // set DR[2:0] in CTRL_REG1 to 1:1:1
+  // Setting fast-read bit for 8-bit data resolution - set F_READ
+  // Set sampling frequency to 1.56Hz - set DR[2:0] to 1:1:1
+  // Standby mode during initialisation - clear ACTIVE
   I2C_Write(ADDRESS_CTRL_REG1, 0x3A); // writing 00111010
   
-  // Set high resolution moode - might not be needed (uses a lot of power)
-  // set MODS[1:0] in CTRL_REG2 to 1:0
-  // I2C_Write(ADDRESS_CTRL_REG2, 0x2);
-  
-  // Allow data ready interrupts - set INT_EN_DRDY bit in CTRL_REG4
+  // Allow data ready interrupts - set INT_EN_DRDY - done in main via Accel_SetMode()
   I2C_Write(ADDRESS_CTRL_REG4, 0x1);
-  // route them through the INT1 pin (tied to PTB4) - set INT_CFG_DRDY bit in CTRL_REG5
-  I2C_Write(ADDRESS_CTRL_REG5, 0x1); 
+  // Route Data Ready interrupts through the INT1 pin (tied to PTB4) - set INT_CFG_DRDY
+  I2C_Write(ADDRESS_CTRL_REG5, 0x1);
+
+  // Same as first step but taking accelerometer out of standby
+  I2C_Write(ADDRESS_CTRL_REG1, 0x3B); // writing 00111011
 
 
   // Saving callback function pointers and arguments
-  dataReadyCallbackFunction  = accelSetup->dataReadyCallbackFunction;
-  dataReadyCallbackArguments = accelSetup->dataReadyCallbackArguments;
+  DataReadyCallbackFunction  = accelSetup->DataReadyCallbackFunction;
+  DataReadyCallbackArguments = accelSetup->DataReadyCallbackArguments;
   
   // Setting up NVIC for PORTB see K70 manual pg 97
   // Vector=104, IRQ=88
@@ -260,73 +250,66 @@ bool Accel_Init(const TAccelSetup* const accelSetup)
 
 
 
-/*! @brief Reads X, Y and Z accelerations.
- *  @param data is a an array of 3 bytes where the X, Y and Z data are stored.
- */
 void Accel_ReadXYZ(uint8_t data[3])
 {
-  // array of 3 unions and one separate union to save data from the accelerometer readings
-  // saves data from the three most recent Accel_ReadXYZ calls to allow for median filtering
-  static TAccelData accelData[3];
+  // array of 3 unions and to save data from the 3 most recent Accel_ReadXYZ calls
+  static TAccelData accelData[3] = {{0,0,0},{0,0,0}};
 
-  // shifts data in the array unions back (index 0 is most recent data, 2 is oldest data)
+  // shifts data in the array unions back (index [0] is most recent data, [2] is oldest data)
   for (uint8_t i = 0; i < 3; i++)
   {
     accelData[2].bytes[i] = accelData[1].bytes[i];
     accelData[1].bytes[i] = accelData[0].bytes[i];
   }
 
-  if (synchronousMode) //call Int or PollRead based on current mode to populate the newest data index
+  // call Int or PollRead based on current mode to populate the newest data array
+  if (SynchronousMode)
     I2C_IntRead(ADDRESS_OUT_X_MSB, accelData[0].bytes, 3);
   else
-    I2C_PollRead(ADDRESS_OUT_X_MSB, accelData[0].bytes, 3);
-
-  // Median filters the last 3 sets of XYZ data
-  for (uint8_t i = 0; i < 3; i++)
-    data[i] = Median_Filter3(accelData[0].bytes[i], accelData[1].bytes[i], accelData[2].bytes[i]);
-}
-
-
-
-/*! @brief Set the mode of the accelerometer.
- *  @param mode specifies either polled or interrupt driven operation.
- */
-void Accel_SetMode(const TAccelMode mode)
-{
-  switch (mode)
   {
-	  case ACCEL_POLL: // disable data ready interrupts
-	    I2C_Write(ADDRESS_CTRL_REG4, 0x0);
-	    synchronousMode = false;
-	    break;
-	
-	  case ACCEL_INT: // enable data ready interrupts
-	    I2C_Write(ADDRESS_CTRL_REG4, 0x1);
-	    synchronousMode = true;
-	    break;
+    I2C_PollRead(ADDRESS_OUT_X_MSB, accelData[0].bytes, 3);
+	// Median filters the last 3 sets of XYZ data - median filtering for IntRead is done in I2CCallback
+    for (uint8_t i = 0; i < 3; i++)
+      data[i] = Median_Filter3(accelData[0].bytes[i], accelData[1].bytes[i], accelData[2].bytes[i]);
   }
 }
 
 
 
-/*! @brief Interrupt service routine for the accelerometer.
- *
- *  The accelerometer has data ready.
- *  The user callback function will be called.
- *  @note Assumes the accelerometer has been initialized.
- *
- *  Triggers only when data is ready to be read (see accel manual for the interrupt flag)
- *  Do not confuse data ready (which is a register flag) with actual XYZ values changing
- *  (interrupt mode doesn't care if they changed or not)
- */
-void __attribute__ ((interrupt)) AccelDataReady_ISR(void)
+void Accel_SetMode(const TAccelMode mode)
 {
-  // clear SRC_DRDY flag in INT_SOURCE reg
-  I2C_Write(ADDRESS_INT_SOURCE, 0x3A);
+  EnterCritical(); // critical section as PIT could trigger in the middle of changing
+	
+  // Starting standby mode (while preserving init bits)
+  I2C_Write(ADDRESS_CTRL_REG1, 0x3A); // writing 00111010
+
+  switch (mode)
+  {
+	  case ACCEL_POLL: // disable data ready interrupts
+	    I2C_Write(ADDRESS_CTRL_REG4, 0x0);
+	    SynchronousMode = false;
+	    break;
+	
+	  case ACCEL_INT: // enable data ready interrupts
+	    I2C_Write(ADDRESS_CTRL_REG4, 0x1);
+	    SynchronousMode = true;
+	    break;
+  }
+
+  // Ending standby mode
+  I2C_Write(ADDRESS_CTRL_REG1, 0x3B); // writing 00111011
   
-  // Callback function
-  if (dataReadyCallbackFunction)
-    (*dataReadyCallbackFunction)(dataReadyCallbackArguments);
+  ExitCritical();
 }
 
 
+
+void __attribute__ ((interrupt)) AccelDataReady_ISR(void)
+{
+  // clear interrupt flag for INT1 (PTB4)
+  PORTB_PCR4 &= ~PORT_PCR_ISF_MASK;
+
+  // Callback function
+  if (DataReadyCallbackFunction)
+    (*DataReadyCallbackFunction)(DataReadyCallbackArguments);
+}

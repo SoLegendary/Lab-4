@@ -1,4 +1,4 @@
-/*! @file
+/*! @file accel.h
  *
  *  @brief HAL for the accelerometer.
  *
@@ -7,7 +7,11 @@
  *  @author PMcL
  *  @date 2015-10-06
  */
-
+/*!
+**  @addtogroup main_module main module documentation
+**
+**  @author Thanit Tangson
+*/
 #ifndef ACCEL_H
 #define ACCEL_H
 
@@ -70,3 +74,4 @@ void Accel_SetMode(const TAccelMode mode);
 void __attribute__ ((interrupt)) AccelDataReady_ISR(void);
 
 #endif
+

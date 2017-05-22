@@ -26,7 +26,7 @@
 /*!
 **  @addtogroup main_module main module documentation
 **
-**  @author Thanit Tangson & Emile Fadel
+**  @author Thanit Tangson
 **  @{
 */
 /* MODULE main */
@@ -42,6 +42,7 @@
 #include "PIT.h"
 #include "FTM.h"
 #include "accel.h"
+#include "median.h"
 #include "PE_Types.h"
 #include "PE_Error.h"
 #include "PE_Const.h"
@@ -59,7 +60,7 @@
 #define CMD_MODE      0x0A
 #define CMD_ACCEL     0x10
 
-// Global volatile variables
+
 
 volatile uint16union_t *towerNumber = NULL; // Currently set tower number and mode
 volatile uint16union_t *towerMode   = NULL;
@@ -275,10 +276,12 @@ bool HandleModePacket(void)
 	    case 0:
 	      synchronousMode = false;
 	      Accel_SetMode(ACCEL_POLL);
+		  PIT_Enable(true);
 	      return true;
       case 1:
 	      synchronousMode = true;
 	      Accel_SetMode(ACCEL_INT);
+		  PIT_Enable(false);
 	      return true;
       default:
 	      return false;
@@ -371,7 +374,21 @@ void HandlePacket(void)
  */
 void PITCallback(void* arg)
 {
-  LEDs_Toggle(LED_GREEN);
+  // shift new data into old before getting new data
+  accelDataOld.bytes[0] = accelDataNew.bytes[0];
+  accelDataOld.bytes[1] = accelDataNew.bytes[1];
+  accelDataOld.bytes[2] = accelDataNew.bytes[2];
+
+  Accel_ReadXYZ(accelDataNew.bytes);
+
+  // If any axes are new, send the packet and toggle green LED
+  if((accelDataOld.bytes[0] != accelDataNew.bytes[0]) ||
+     (accelDataOld.bytes[1] != accelDataNew.bytes[1]) ||
+     (accelDataOld.bytes[2] != accelDataNew.bytes[2]))
+  {
+    Packet_Put(CMD_ACCEL, accelDataNew.bytes[0], accelDataNew.bytes[1], accelDataNew.bytes[2]);
+    LEDs_Toggle(LED_GREEN);
+  }
 }
   
 /*! @brief User callback function for use as an RTC_Init parameter
@@ -408,29 +425,31 @@ void AccelCallback(void* arg)
  */
 void I2CCallback(void* arg)
 {
+  // This callback copies some code from Accel_ReadXYZ due to order problems with synchronous mode
+	
+  // array of 3 unions and to save data from the 3 most recent Accel_ReadXYZ calls
+  static TAccelData accelData[3] = {{0,0,0},{0,0,0}};
+
+  // shifts data in the array unions back (index 0 is most recent data, 2 is oldest data)
+  for (uint8_t i = 0; i < 3; i++)
+  {
+    accelData[2].bytes[i] = accelData[1].bytes[i];
+    accelData[1].bytes[i] = accelData[0].bytes[i];
+  }
+  
+  // Populate newest array
+  accelData[0].bytes[0] = accelDataNew.bytes[0];
+  accelData[0].bytes[1] = accelDataNew.bytes[1];
+  accelData[0].bytes[2] = accelDataNew.bytes[2];
+
+  // Median filters the last 3 sets of XYZ data
+  for (uint8_t i = 0; i < 3; i++)
+    accelDataNew.bytes[i] = Median_Filter3(accelData[0].bytes[i], accelData[1].bytes[i], accelData[2].bytes[i]);
+  
+  // Send data back to PC
   Packet_Put(CMD_ACCEL, accelDataNew.bytes[0], accelDataNew.bytes[1], accelDataNew.bytes[2]);
   LEDs_Toggle(LED_GREEN);
 }
-
-void AccelPoll(void)
-{
-  // shift new data into old before getting new data
-  accelDataOld.bytes[0] = accelDataNew.bytes[0];
-  accelDataOld.bytes[1] = accelDataNew.bytes[1];
-  accelDataOld.bytes[2] = accelDataNew.bytes[2];
-
-  Accel_ReadXYZ(accelDataNew.bytes);
-
-  // If any axes are new, send the packet and toggle green LED
-  if((accelDataOld.bytes[0] != accelDataNew.bytes[0]) ||
-     (accelDataOld.bytes[1] != accelDataNew.bytes[1]) ||
-     (accelDataOld.bytes[2] != accelDataNew.bytes[2]))
-  {
-    Packet_Put(CMD_ACCEL, accelDataNew.bytes[0], accelDataNew.bytes[1], accelDataNew.bytes[2]);
-    LEDs_Toggle(LED_GREEN);
-  }
-}
-
 
 
 
@@ -451,7 +470,7 @@ int main(void)
   FTM0Channel0.userArguments       = NULL;
   
   TAccelSetup accelSetup; // Struct to set up the accelerometer via I2C0
-  accelSetup.moduleClk                     = 50000000;
+  accelSetup.moduleClk                     = CPU_BUS_CLK_HZ;
   accelSetup.dataReadyCallbackFunction     = AccelCallback;
   accelSetup.dataReadyCallbackArguments    = NULL;
   accelSetup.readCompleteCallbackFunction  = I2CCallback;
@@ -477,8 +496,8 @@ int main(void)
       // RTC_Init(RTCCallback, NULL) &&
 	    Accel_Init(&accelSetup))
   {
-    // PIT_Set(500000000, true);
-    // PIT_Enable(true);
+    PIT_Set(1000000000, true);
+    PIT_Enable(true);
 
     LEDs_On(LED_ORANGE);
     HandleStartupPacket();
@@ -495,9 +514,6 @@ int main(void)
       if (Packet_Get()) // If a packet is received.
         HandlePacket(); // Handle the packet appropriately.
       // UART_Poll(); // Continue polling the UART for activity - uncomment for use in Lab 1 or 2
-
-	    if (!synchronousMode)
-	      AccelPoll();
     }
   }
 
